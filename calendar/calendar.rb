@@ -1,7 +1,7 @@
 require 'rubygems'
-require 'google/api_client'
 require 'google/api_client/client_secrets'
-require 'google/api_client/auth/file_storage'
+require 'google/api_client/auth/storages/file_store'
+require 'google/apis/calendar_v3'
 require 'sinatra'
 require 'logger'
 
@@ -19,9 +19,9 @@ def user_credentials
   # Build a per-request oauth credential based on token stored in session
   # which allows us to use a shared API client.
   @authorization ||= (
-    auth = api_client.authorization.dup
+    auth = api_client.dup
     auth.redirect_uri = to('/oauth2callback')
-    auth.update_token!(session)
+    auth.update!(session)
     auth
   )
 end
@@ -32,24 +32,26 @@ configure do
   logger = Logger.new(log_file)
   logger.level = Logger::DEBUG
 
-  client = Google::APIClient.new(
-    :application_name => 'Ruby Calendar sample',
-    :application_version => '1.0.0')
-  
-  file_storage = Google::APIClient::FileStorage.new(CREDENTIAL_STORE_FILE)
-  if file_storage.authorization.nil?
+  client = Google::APIClient.new
+
+  file_storage = Google::APIClient::FileStore.new(CREDENTIAL_STORE_FILE)
+  unless file_storage.load_credentials
     client_secrets = Google::APIClient::ClientSecrets.load
-    client.authorization = client_secrets.to_authorization
-    client.authorization.scope = 'https://www.googleapis.com/auth/calendar'
+    client = client_secrets.to_authorization
   else
-    client.authorization = file_storage.authorization
+    client = Google::APIClient::ClientSecrets.new(web: file_storage.load_credentials).to_authorization
   end
+
+  client.update!(
+    scope: 'https://www.googleapis.com/auth/calendar'
+  )
 
   # Since we're saving the API definition to the settings, we're only retrieving
   # it once (on server start) and saving it between requests.
   # If this is still an issue, you could serialize the object and load it on
   # subsequent runs.
-  calendar = client.discovered_api('calendar', 'v3')
+  calendar = Google::Apis::CalendarV3::CalendarService.new
+  calendar.authorization = client
 
   set :logger, logger
   set :api_client, client
@@ -70,7 +72,7 @@ after do
   session[:expires_in] = user_credentials.expires_in
   session[:issued_at] = user_credentials.issued_at
 
-  file_storage = Google::APIClient::FileStorage.new(CREDENTIAL_STORE_FILE)
+  file_storage = Google::APIClient::FileStore.new(CREDENTIAL_STORE_FILE)
   file_storage.write_credentials(user_credentials)
 end
 
@@ -88,8 +90,7 @@ end
 
 get '/' do
   # Fetch list of events on the user's default calandar
-  result = api_client.execute(:api_method => calendar_api.events.list,
-                              :parameters => {'calendarId' => 'primary'},
-                              :authorization => user_credentials)
-  [result.status, {'Content-Type' => 'application/json'}, result.data.to_json]
+  calendar_api.authorization = user_credentials
+  result = calendar_api.list_events('primary')
+  [200, {'Content-Type' => 'application/json'}, result.to_json]
 end
